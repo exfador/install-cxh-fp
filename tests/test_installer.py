@@ -1,6 +1,8 @@
 import ast
 import re
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -80,6 +82,8 @@ LANGUAGE=en
 ensure_account() { printf 'account\\n'; }
 stat() { printf 'coxerhub'; }
 validate_python_prefix() { :; }
+install_python() { printf 'python\\n'; }
+runuser() { printf 'venv\\n'; }
 PYTHON_PREFIX="$PWD/python"
 install_dependencies() { printf 'dependencies\\n'; }
 configure_project() { printf 'setup\\n'; }
@@ -99,6 +103,7 @@ resume_existing
     result = run_shell("cd " + repr(str(tmp_path)) + "\n" + body, tmp_path)
     assert result.returncode == 0, result.stderr
     assert "dependencies\n" in result.stdout and "setup\nstart\n" in result.stdout
+    assert "python\nvenv\n" in result.stdout
     assert marker.read_text(encoding=ENCODING) == "preserved"
 
 
@@ -170,3 +175,127 @@ def test_bash_functions_stay_compact():
         r"^([a-z_]+)\(\) \{\n(.*?)^\}", source, re.MULTILINE | re.DOTALL
     ):
         assert len(match.group(0).splitlines()) <= 30, match.group(1)
+
+
+PYTHON_BUILD_FIXTURE = """
+cd __WORK_DIRECTORY__
+LANGUAGE=en
+WORK_DIRECTORY="$PWD"
+PYTHON_PREFIX="$PWD/prefix"
+timeout() { shift; "$@"; }
+validate_python_prefix() { printf 'ownership\\n'; }
+download() { printf 'download\\n'; }
+sha256sum() { cat >/dev/null; printf 'checksum\\n'; }
+tar() { printf 'extract\\n'; }
+install() { printf 'directories\\n'; }
+build_jobs() { printf '1'; }
+make() {
+    printf 'make %s\\n' "$*"
+    if [[ "$1" == 'altinstall' ]]; then
+        printf '#!/bin/bash\\nexit 0\\n' > "$PYTHON_PREFIX/bin/python3.11"
+    fi
+}
+install_python
+"""
+
+
+def python_build_fixture(tmp_path, complete=False):
+    binary = tmp_path / "prefix/bin/python3.11"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(
+        "#!/bin/bash\nexit " + ("0" if complete else "1") + "\n", encoding=ENCODING
+    )
+    binary.chmod(0o755)
+    build = tmp_path / "Python-3.11.16"
+    build.mkdir()
+    configure = build / "configure"
+    configure.write_text("#!/bin/bash\nprintf 'configure\\n'\n", encoding=ENCODING)
+    configure.chmod(0o755)
+    return PYTHON_BUILD_FIXTURE.replace("__WORK_DIRECTORY__", repr(str(tmp_path)))
+
+
+def test_incomplete_executable_python_is_rebuilt_without_touching_private_data(
+    tmp_path,
+):
+    marker = tmp_path / "private.txt"
+    marker.write_text("preserved", encoding=ENCODING)
+    result = run_shell(python_build_fixture(tmp_path), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "download\nchecksum\nextract\n" in result.stdout
+    assert "make -j 1\nmake altinstall\n" in result.stdout
+    assert marker.read_text(encoding=ENCODING) == "preserved"
+
+
+def test_complete_python_skips_download_and_rebuild(tmp_path):
+    result = run_shell(python_build_fixture(tmp_path, complete=True), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ownership\n"
+
+
+def test_failed_rebuild_cannot_continue_to_venv_or_service(tmp_path):
+    source = python_build_fixture(tmp_path)
+    source = source.replace(
+        "install_python\n",
+        "make() { return 9; }\ninstall_python\nprintf 'UNEXPECTED'\n",
+    )
+    result = run_shell(source, tmp_path)
+    assert result.returncode == 9
+    assert "UNEXPECTED" not in result.stdout
+
+
+def test_successful_make_with_incomplete_python_still_stops(tmp_path):
+    source = python_build_fixture(tmp_path)
+    source = source.replace(
+        "install_python\n",
+        "make() { return 0; }\ninstall_python\nprintf 'UNEXPECTED'\n",
+    )
+    result = run_shell(source, tmp_path)
+    assert result.returncode == 1
+    assert "Python installation is incomplete" in result.stderr
+    assert "UNEXPECTED" not in result.stdout
+
+
+def test_python_probe_is_isolated_and_checks_version_and_stdlib():
+    source = (ROOT / "installer.sh.in").read_text(encoding=ENCODING)
+    assert '-I -c "$PYTHON_PROBE" "$PYTHON_VERSION"' in source
+    for module in ("ensurepip", "sqlite3", "ssl", "venv", "zipfile"):
+        assert f"import {module}" in source
+    assert "sys.version_info[:3]" in source and "archive.testzip()" in source
+
+
+def bootstrap_probe(tmp_path, packages, corrupt=False):
+    bundle = tmp_path / "_bundled"
+    bundle.mkdir()
+    for package in packages:
+        wheel = bundle / f"{package}-1.0.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr(f"{package}/__init__.py", "ready")
+        if corrupt and package == "setuptools":
+            wheel.write_bytes(wheel.read_bytes().replace(b"ready", b"wrong"))
+    source = (ROOT / "installer.sh.in").read_text(encoding=ENCODING)
+    probe = re.search(r"PYTHON_PROBE='(.*?)'\n", source, re.DOTALL).group(1)
+    prelude = "import sys, types\nmodule = types.ModuleType('ensurepip')\n"
+    prelude += f"module.__file__ = {str(tmp_path / '__init__.py')!r}\n"
+    prelude += "module.version = lambda: '1.0'\nsys.modules['ensurepip'] = module\n"
+    version = ".".join(map(str, sys.version_info[:3]))
+    return subprocess.run(
+        [sys.executable, "-I", "-c", prelude + probe, version],
+        capture_output=True,
+        timeout=5,
+    )
+
+
+@pytest.mark.parametrize(
+    "packages, corrupt, expected",
+    [
+        (("pip", "setuptools"), False, 0),
+        (("pip",), False, 1),
+        (("setuptools",), False, 1),
+        (("pip", "setuptools"), True, 1),
+    ],
+)
+def test_real_probe_requires_both_valid_bootstrap_wheels(
+    tmp_path, packages, corrupt, expected
+):
+    result = bootstrap_probe(tmp_path, packages, corrupt)
+    assert result.returncode == expected

@@ -19,6 +19,28 @@ DOWNLOAD_TIMEOUT='180'
 PYTHON_BUILD_TIMEOUT='1800'
 PYTHON_BUILD_MEMORY_KIB='786432'
 PYTHON_BUILD_MAX_JOBS='4'
+PYTHON_PROBE_TIMEOUT='15'
+PYTHON_PROBE='import ensurepip
+import sqlite3
+import ssl
+import sys
+import venv
+import zipfile
+from pathlib import Path
+
+if tuple(sys.version_info[:3]) != tuple(map(int, sys.argv[1].split("."))):
+    raise SystemExit(1)
+ssl.create_default_context()
+sqlite3.connect(":memory:").close()
+venv.EnvBuilder(with_pip=True)
+bundled = Path(ensurepip.__file__).with_name("_bundled")
+for package in ("pip", "setuptools"):
+    wheel = next(bundled.glob(f"{package}-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        if archive.testzip() is not None:
+            raise SystemExit(1)
+if not ensurepip.version():
+    raise SystemExit(1)'
 SERVICE_READY_TIMEOUT='210'
 LANGUAGE=''
 MODE='install'
@@ -27,6 +49,8 @@ LOCK_DIRECTORY='/run/cxh-fp-installer'
 LOCK_FILE='/run/cxh-fp-installer/install.lock'
 VERIFIER_SOURCE_BASE64='__EMBEDDED_VERIFIER_BASE64__'
 SERVICE_UNIT_BASE64='__EMBEDDED_SERVICE_BASE64__'
+READINESS_SOURCE_BASE64='__EMBEDDED_READINESS_BASE64__'
+READINESS_TIMEOUT='5'
 
 say() {
     local russian="$1" english="$2"
@@ -149,9 +173,14 @@ validate_python_prefix() {
     done
 }
 
+python_is_complete() {
+    [[ -x "$PYTHON_PREFIX/bin/python3.11" ]] || return 1
+    timeout "$PYTHON_PROBE_TIMEOUT" "$PYTHON_PREFIX/bin/python3.11" -I -c "$PYTHON_PROBE" "$PYTHON_VERSION" >/dev/null 2>&1
+}
+
 install_python() {
     validate_python_prefix
-    [[ ! -x "$PYTHON_PREFIX/bin/python3.11" ]] || return 0
+    if python_is_complete; then return 0; fi
     say '[3/5] Сборка Python 3.11.16. Системный Python не меняется.' '[3/5] Building Python 3.11.16. System Python stays unchanged.'
     download "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" "$WORK_DIRECTORY/python.tar.xz" "$ARCHIVE_LIMIT"
     printf '%s  %s\n' "$PYTHON_ARCHIVE_SHA256" "$WORK_DIRECTORY/python.tar.xz" | sha256sum --check --status
@@ -164,6 +193,7 @@ install_python() {
         timeout "$PYTHON_BUILD_TIMEOUT" make altinstall
     )
     chmod -R go-w "$PYTHON_PREFIX"
+    python_is_complete || fail 'Сборка Python не завершена. Повторите установщик; данные сохранены.' 'Python installation is incomplete. Rerun the installer; data was preserved.'
 }
 
 ensure_account() {
@@ -216,24 +246,8 @@ write_service() {
 check_ready() {
     local supervisor_pid
     supervisor_pid="$(systemctl show --property MainPID --value "$SERVICE_NAME")"
-    /usr/bin/python3 -I - "$PROJECT_DIRECTORY" "$supervisor_pid" <<'CXH_READY_PY'
-import json
-import sys
-from pathlib import Path
-
-root, supervisor = Path(sys.argv[1]), sys.argv[2]
-try:
-    children = Path(f"/proc/{supervisor}/task/{supervisor}/children").read_text(encoding="ascii").split()
-    health = json.loads((root / "storage/updates/healthy.json").read_text(encoding="utf-8"))
-    active = False
-    for child in children:
-        environment = Path(f"/proc/{child}/environ").read_bytes().split(b"\0")
-        nonce = b"CXH_UPDATE_HEALTH_NONCE=" + health["nonce"].encode("ascii")
-        active = active or nonce in environment
-    raise SystemExit(not active)
-except (OSError, ValueError, KeyError, TypeError):
-    raise SystemExit(1)
-CXH_READY_PY
+    printf '%s' "$READINESS_SOURCE_BASE64" | base64 --decode > "$WORK_DIRECTORY/readiness.py"
+    timeout "$READINESS_TIMEOUT" /usr/bin/python3 -I "$WORK_DIRECTORY/readiness.py" "$PROJECT_DIRECTORY" "$supervisor_pid"
 }
 
 start_service() {
@@ -258,9 +272,8 @@ resume_existing() {
     [[ -f "$PROJECT_DIRECTORY/main.py" && -f "$PROJECT_DIRECTORY/requirements.txt" ]] || fail 'Папка занята другой установкой. Ничего не изменено.' 'The directory belongs to another installation. Nothing was changed.'
     [[ "$(stat -c '%U' "$PROJECT_DIRECTORY")" == "$SERVICE_USER" ]] || fail 'Владелец папки не coxerhub. Ничего не изменено.' 'The directory owner is not coxerhub. Nothing was changed.'
     ensure_account
-    validate_python_prefix
-    [[ -x "$PYTHON_PREFIX/bin/python3.11" ]] || fail 'Не найден Python установки. Данные сохранены.' 'The installation Python is missing. Data was preserved.'
-    [[ -x "$PROJECT_DIRECTORY/.venv/bin/python" ]] || runuser -u "$SERVICE_USER" -- "$PYTHON_PREFIX/bin/python3.11" -m venv "$PROJECT_DIRECTORY/.venv"
+    install_python
+    runuser -u "$SERVICE_USER" -- "$PYTHON_PREFIX/bin/python3.11" -m venv "$PROJECT_DIRECTORY/.venv"
     install_dependencies
     say 'Установка найдена. Код, плагины и данные сохранены. Обновления — в Telegram.' 'Installation found. Code, plugins and data were preserved. Update from Telegram.'
     configure_project

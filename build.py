@@ -44,12 +44,16 @@ def main():
     compile(source, "embedded-verifier.py", "exec")
     template = (ROOT / "installer.sh.in").read_text(encoding=ENCODING)
     service = (ROOT / "cxh-fp.service").read_bytes()
+    readiness = (BOOTSTRAP / "readiness.py").read_bytes()
     result = template.replace(
         "__EMBEDDED_VERIFIER_BASE64__",
         base64.b64encode(source.encode(ENCODING)).decode("ascii"),
     )
     result = result.replace(
         "__EMBEDDED_SERVICE_BASE64__", base64.b64encode(service).decode("ascii")
+    )
+    result = result.replace(
+        "__EMBEDDED_READINESS_BASE64__", base64.b64encode(readiness).decode("ascii")
     )
     destination = ROOT / "install_cxh_fp.sh"
     destination.write_text(result, encoding=ENCODING)

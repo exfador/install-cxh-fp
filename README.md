@@ -1,4 +1,11 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/exfador/cxh-fp/v1.1/bot-profile/avatar.jpg" width="160" alt="CXH FP fox" />
+</p>
+
 # 🦊 CXH FP · Ubuntu installer
+
+[![Installer checks](https://github.com/exfador/install-cxh-fp/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/exfador/install-cxh-fp/actions/workflows/quality.yml)
+[![CXH FP 1.1](https://img.shields.io/badge/CXH_FP-1.1-orange)](https://github.com/exfador/cxh-fp/releases/latest)
 
 Установка [CXH FP](https://github.com/exfador/cxh-fp) на собственный сервер: выбор русского или английского языка, проверенный релиз, отдельный Python и служба systemd.
 
