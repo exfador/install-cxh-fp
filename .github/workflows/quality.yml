@@ -1,0 +1,28 @@
+name: Installer checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verifier:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: sudo apt-get update && sudo apt-get install -y python3-cryptography python3-pytest shellcheck
+      - run: /usr/bin/python3 build.py && git diff --exit-code install_cxh_fp.sh
+      - run: /usr/bin/python3 -m pytest tests -q
+      - run: bash -n install_cxh_fp.sh
+      - run: shellcheck -e SC1091,SC2034 install_cxh_fp.sh
+      - run: bash install_cxh_fp.sh --preview --language ru
+      - run: bash install_cxh_fp.sh --preview --language en
+      - run: script -q -c 'bash install_cxh_fp.sh --check --language en' /dev/null
+      - run: |
+          curl --fail --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize 262144 https://github.com/exfador/cxh-fp/releases/latest/download/cxh-fp-manifest.json -o "$RUNNER_TEMP/cxh-manifest.json"
+          curl --fail --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize 52428800 https://github.com/exfador/cxh-fp/releases/latest/download/cxh-fp.zip -o "$RUNNER_TEMP/cxh-release.zip"
+          /usr/bin/python3 -m bootstrap.verify "$RUNNER_TEMP/cxh-manifest.json" "$RUNNER_TEMP/cxh-release.zip" "$RUNNER_TEMP/cxh-verified"

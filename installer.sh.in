@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+
+PROJECT_DIRECTORY='/opt/cxh-fp'
+SERVICE_NAME='cxh-fp.service'
+SERVICE_FILE='/etc/systemd/system/cxh-fp.service'
+SERVICE_USER='coxerhub'
+SERVICE_HOME='/var/lib/cxh-fp'
+PYTHON_VERSION='3.11.16'
+PYTHON_PREFIX='/opt/cxh-python/3.11.16'
+PYTHON_ARCHIVE_SHA256='91bcdebfdde239a003ae93738a7fce0f9230fee5c4bc2b86f6e6e8c6f98aabe8'
+RELEASE_ROOT='https://github.com/exfador/cxh-fp/releases/latest/download'
+ARCHIVE_LIMIT='52428800'
+MANIFEST_LIMIT='262144'
+DOWNLOAD_TIMEOUT='180'
+PYTHON_BUILD_TIMEOUT='1800'
+PYTHON_BUILD_MEMORY_KIB='786432'
+PYTHON_BUILD_MAX_JOBS='4'
+SERVICE_READY_TIMEOUT='210'
+LANGUAGE=''
+MODE='install'
+WORK_DIRECTORY=''
+LOCK_DIRECTORY='/run/cxh-fp-installer'
+LOCK_FILE='/run/cxh-fp-installer/install.lock'
+VERIFIER_SOURCE_BASE64='__EMBEDDED_VERIFIER_BASE64__'
+SERVICE_UNIT_BASE64='__EMBEDDED_SERVICE_BASE64__'
+
+say() {
+    local russian="$1" english="$2"
+    if [[ "$LANGUAGE" == 'ru' ]]; then printf '  %s\n' "$russian"; else printf '  %s\n' "$english"; fi
+}
+
+fail() {
+    say "$1" "$2" >&2
+    exit 1
+}
+
+parse_arguments() {
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --language|--lang) [[ "$#" -ge 2 ]] || exit 2; LANGUAGE="$2"; shift 2 ;;
+            --check) MODE='check'; shift ;;
+            --preview) MODE='preview'; shift ;;
+            --help|-h) printf 'CXH FP Ubuntu installer\n--language ru|en  --check  --preview\n'; exit 0 ;;
+            *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+        esac
+    done
+    [[ -z "$LANGUAGE" || "$LANGUAGE" == 'ru' || "$LANGUAGE" == 'en' ]] || exit 2
+}
+
+choose_language() {
+    [[ -z "$LANGUAGE" ]] || return 0
+    printf '\n  🦊 CXH FP\n  1. Русский\n  2. English\n'
+    local choice
+    while true; do
+        read -r -p '  > ' choice || exit 1
+        case "$choice" in 1|ru) LANGUAGE='ru'; return ;; 2|en) LANGUAGE='en'; return ;; esac
+        printf '  Выберите 1 или 2 / Choose 1 or 2\n'
+    done
+}
+
+preview_plan() {
+    say 'Ubuntu 22.04 / 24.04 LTS · x86_64 / aarch64 · systemd' 'Ubuntu 22.04 / 24.04 LTS · x86_64 / aarch64 · systemd'
+    say '1. Проверка системы и подписанного релиза CXH FP.' '1. Check the system and signed CXH FP release.'
+    say '2. Python 3.11.16 отдельно от системного Python.' '2. Python 3.11.16 separate from the system Python.'
+    say '3. /opt/cxh-fp, пользователь coxerhub, зависимости с хешами.' '3. /opt/cxh-fp, coxerhub user, hash-locked dependencies.'
+    say '4. Настройка без отображения ключей и запуск через systemd.' '4. Configure without displaying secrets; start with systemd.'
+    say 'Первая сборка Python может занять 10–20 минут. Существующие установки и данные не переносятся.' 'The first Python build may take 10–20 minutes. Existing installations and data are not migrated.'
+}
+
+validate_platform() {
+    [[ -r /etc/os-release ]] || fail 'Нужна Ubuntu 22.04 или 24.04.' 'Ubuntu 22.04 or 24.04 is required.'
+    local ID='' VERSION_ID=''
+    source /etc/os-release
+    [[ "$ID" == 'ubuntu' && ( "$VERSION_ID" == '22.04' || "$VERSION_ID" == '24.04' ) ]] || fail 'Поддерживаются Ubuntu 22.04 и 24.04 LTS.' 'Supported: Ubuntu 22.04 and 24.04 LTS.'
+    case "$(uname -m)" in x86_64|aarch64) ;; *) fail 'Поддерживаются x86_64 и aarch64.' 'Supported: x86_64 and aarch64.' ;; esac
+    [[ -d /run/systemd/system ]] || fail 'Нужна система с запущенным systemd.' 'A running systemd installation is required.'
+    [[ -t 0 && -t 1 ]] || fail 'Запустите установщик в интерактивном терминале.' 'Run the installer in an interactive terminal.'
+}
+
+validate_private_paths() {
+    local path
+    [[ "$(stat -c '%u' /opt)" == '0' && -z "$(find /opt -maxdepth 0 -perm /022 -print)" ]] || fail 'Папка /opt должна принадлежать root.' 'The /opt directory must be owned and writable only by root.'
+    for path in /opt "$PYTHON_PREFIX" /opt/cxh-python "$LOCK_DIRECTORY" "$LOCK_FILE" "$SERVICE_HOME" "$PROJECT_DIRECTORY" "$SERVICE_FILE"; do
+        [[ ! -L "$path" ]] || fail 'Обнаружена символическая ссылка в пути установки.' 'A symbolic link was found in an installation path.'
+    done
+    [[ ! -e "$PROJECT_DIRECTORY" || -d "$PROJECT_DIRECTORY" ]] || fail 'Путь установки занят файлом.' 'The installation path is occupied by a file.'
+    [[ ! -e "$SERVICE_FILE" ]] || grep -Fxq 'Description=CXH FP — FunPay shop' "$SERVICE_FILE" || fail 'Служба cxh-fp принадлежит другой установке.' 'The cxh-fp service belongs to another installation.'
+}
+
+prepare_workspace() {
+    [[ ! -e "$LOCK_DIRECTORY" ]] || [[ -d "$LOCK_DIRECTORY" && "$(stat -c '%u' "$LOCK_DIRECTORY")" == '0' && "$(stat -c '%a' "$LOCK_DIRECTORY")" == '700' ]] || fail 'Некорректная папка блокировки.' 'Invalid installer lock directory.'
+    install -d -o root -g root -m 700 "$LOCK_DIRECTORY"
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || fail 'Другой установщик уже запущен.' 'Another installer is running.'
+    WORK_DIRECTORY="$(mktemp -d /opt/.cxh-fp-install.XXXXXXXX)"
+    trap 'rm -rf -- "$WORK_DIRECTORY"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+download() {
+    local url="$1" target="$2" maximum="$3"
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 2 --max-filesize "$maximum" \
+        --output "$target" "$url"
+}
+
+install_bootstrap_packages() {
+    say '[1/5] Установка системных пакетов.' '[1/5] Installing system packages.'
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl python3 python3-cryptography \
+        build-essential pkg-config xz-utils libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libffi-dev \
+        liblzma-dev libgdbm-dev libncursesw5-dev uuid-dev util-linux
+}
+
+write_verifier() {
+    printf '%s' "$VERIFIER_SOURCE_BASE64" | base64 --decode > "$WORK_DIRECTORY/verify.py"
+}
+
+download_release() {
+    say '[2/5] Проверка подписи и каждого файла релиза.' '[2/5] Checking the signature and every release file.'
+    download "$RELEASE_ROOT/cxh-fp-manifest.json" "$WORK_DIRECTORY/manifest.json" "$MANIFEST_LIMIT"
+    download "$RELEASE_ROOT/cxh-fp.zip" "$WORK_DIRECTORY/release.zip" "$ARCHIVE_LIMIT"
+    write_verifier
+    /usr/bin/python3 -I "$WORK_DIRECTORY/verify.py" "$WORK_DIRECTORY/manifest.json" "$WORK_DIRECTORY/release.zip" "$WORK_DIRECTORY/source"
+}
+
+build_jobs() {
+    local available memory_jobs cpu_jobs
+    available="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+    memory_jobs=$(( available / PYTHON_BUILD_MEMORY_KIB ))
+    (( memory_jobs > 0 )) || memory_jobs=1
+    cpu_jobs="$(nproc)"
+    (( cpu_jobs <= memory_jobs )) || cpu_jobs="$memory_jobs"
+    (( cpu_jobs <= PYTHON_BUILD_MAX_JOBS )) || cpu_jobs="$PYTHON_BUILD_MAX_JOBS"
+    printf '%s' "$cpu_jobs"
+}
+
+validate_python_prefix() {
+    local path
+    for path in /opt/cxh-python "$PYTHON_PREFIX"; do
+        [[ ! -e "$path" ]] && continue
+        [[ -d "$path" && "$(stat -c '%u' "$path")" == '0' ]] || fail 'Некорректный владелец Python.' 'Invalid Python installation owner.'
+        [[ -z "$(find "$path" \( -perm /022 -o ! -user root \) -print -quit)" ]] || fail 'Python доступен для записи другому пользователю.' 'Python is writable by another user.'
+    done
+}
+
+install_python() {
+    validate_python_prefix
+    [[ ! -x "$PYTHON_PREFIX/bin/python3.11" ]] || return 0
+    say '[3/5] Сборка Python 3.11.16. Системный Python не меняется.' '[3/5] Building Python 3.11.16. System Python stays unchanged.'
+    download "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" "$WORK_DIRECTORY/python.tar.xz" "$ARCHIVE_LIMIT"
+    printf '%s  %s\n' "$PYTHON_ARCHIVE_SHA256" "$WORK_DIRECTORY/python.tar.xz" | sha256sum --check --status
+    tar -xJf "$WORK_DIRECTORY/python.tar.xz" --directory "$WORK_DIRECTORY" --no-same-owner
+    install -d -m 755 /opt/cxh-python
+    (
+        cd "$WORK_DIRECTORY/Python-$PYTHON_VERSION"
+        ./configure --prefix="$PYTHON_PREFIX" --with-ensurepip=install
+        timeout "$PYTHON_BUILD_TIMEOUT" make -j "$(build_jobs)"
+        timeout "$PYTHON_BUILD_TIMEOUT" make altinstall
+    )
+    chmod -R go-w "$PYTHON_PREFIX"
+}
+
+ensure_account() {
+    local account uid home shell
+    if account="$(getent passwd "$SERVICE_USER")"; then
+        IFS=: read -r _ _ uid _ _ home shell <<< "$account"
+        [[ "$uid" != '0' && "$home" == "$SERVICE_HOME" && "$shell" == '/usr/sbin/nologin' ]] || fail 'Имя coxerhub уже занято другим пользователем.' 'The coxerhub name belongs to another user.'
+        return 0
+    fi
+    useradd --system --user-group --home-dir "$SERVICE_HOME" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    chmod 700 "$SERVICE_HOME"
+}
+
+prepare_project() {
+    say '[4/5] Подготовка магазина и зависимостей.' '[4/5] Preparing the shop and dependencies.'
+    ensure_account
+    [[ ! -e "$PROJECT_DIRECTORY" ]] || fail 'Папка установки уже существует. Данные сохранены.' 'The installation directory already exists. Data was preserved.'
+    mv -- "$WORK_DIRECTORY/source" "$PROJECT_DIRECTORY"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$PROJECT_DIRECTORY"
+    runuser -u "$SERVICE_USER" -- "$PYTHON_PREFIX/bin/python3.11" -m venv "$PROJECT_DIRECTORY/.venv"
+    install_dependencies
+}
+
+install_dependencies() {
+    (
+        cd "$PROJECT_DIRECTORY"
+        runuser -u "$SERVICE_USER" -- env PIP_CONFIG_FILE=/dev/null "$PROJECT_DIRECTORY/.venv/bin/python" -m pip --isolated install --index-url https://pypi.org/simple --disable-pip-version-check \
+            --require-hashes --only-binary=:all: --timeout 30 --retries 2 -r requirements.txt
+        runuser -u "$SERVICE_USER" -- "$PROJECT_DIRECTORY/.venv/bin/python" -m pip check
+    )
+}
+
+configure_project() {
+    [[ ! -f "$PROJECT_DIRECTORY/configs/_main.cfg" ]] || return 0
+    say '[5/5] Настройте FunPay и Telegram.' '[5/5] Configure FunPay and Telegram.'
+    (
+        cd "$PROJECT_DIRECTORY"
+        runuser -u "$SERVICE_USER" -- "$PROJECT_DIRECTORY/.venv/bin/python" first_setup.py --language "$LANGUAGE"
+    )
+    [[ -f "$PROJECT_DIRECTORY/configs/_main.cfg" ]] || fail 'Настройка отменена. Служба не запущена; повторите установщик.' 'Setup was cancelled. The service was not started; rerun the installer.'
+}
+
+write_service() {
+    local temporary="$WORK_DIRECTORY/cxh-fp.service"
+    printf '%s' "$SERVICE_UNIT_BASE64" | base64 --decode > "$temporary"
+    systemd-analyze verify "$temporary"
+    install -o root -g root -m 644 "$temporary" "$SERVICE_FILE"
+}
+
+check_ready() {
+    local supervisor_pid
+    supervisor_pid="$(systemctl show --property MainPID --value "$SERVICE_NAME")"
+    /usr/bin/python3 -I - "$PROJECT_DIRECTORY" "$supervisor_pid" <<'CXH_READY_PY'
+import json
+import sys
+from pathlib import Path
+
+root, supervisor = Path(sys.argv[1]), sys.argv[2]
+try:
+    children = Path(f"/proc/{supervisor}/task/{supervisor}/children").read_text(encoding="ascii").split()
+    health = json.loads((root / "storage/updates/healthy.json").read_text(encoding="utf-8"))
+    active = False
+    for child in children:
+        environment = Path(f"/proc/{child}/environ").read_bytes().split(b"\0")
+        nonce = b"CXH_UPDATE_HEALTH_NONCE=" + health["nonce"].encode("ascii")
+        active = active or nonce in environment
+    raise SystemExit(not active)
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+CXH_READY_PY
+}
+
+start_service() {
+    write_service
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME"
+    local deadline=$(( SECONDS + SERVICE_READY_TIMEOUT ))
+    while (( SECONDS < deadline )); do
+        if systemctl is-active --quiet "$SERVICE_NAME" && check_ready; then
+            say 'Готово. CXH FP работает. Откройте своего Telegram-бота: /start.' 'Ready. CXH FP is running. Open your Telegram bot: /start.'
+            printf '  systemctl status cxh-fp\n  journalctl -u cxh-fp -n 50\n'
+            return 0
+        fi
+        sleep 2
+    done
+    fail 'Служба запущена, но готовность не подтверждена. Проверьте systemctl status cxh-fp.' 'The service started, but readiness was not confirmed. Check systemctl status cxh-fp.'
+}
+
+resume_existing() {
+    [[ -e "$PROJECT_DIRECTORY" ]] || return 1
+    [[ -f "$PROJECT_DIRECTORY/main.py" && -f "$PROJECT_DIRECTORY/requirements.txt" ]] || fail 'Папка занята другой установкой. Ничего не изменено.' 'The directory belongs to another installation. Nothing was changed.'
+    [[ "$(stat -c '%U' "$PROJECT_DIRECTORY")" == "$SERVICE_USER" ]] || fail 'Владелец папки не coxerhub. Ничего не изменено.' 'The directory owner is not coxerhub. Nothing was changed.'
+    ensure_account
+    validate_python_prefix
+    [[ -x "$PYTHON_PREFIX/bin/python3.11" ]] || fail 'Не найден Python установки. Данные сохранены.' 'The installation Python is missing. Data was preserved.'
+    [[ -x "$PROJECT_DIRECTORY/.venv/bin/python" ]] || runuser -u "$SERVICE_USER" -- "$PYTHON_PREFIX/bin/python3.11" -m venv "$PROJECT_DIRECTORY/.venv"
+    install_dependencies
+    say 'Установка найдена. Код, плагины и данные сохранены. Обновления — в Telegram.' 'Installation found. Code, plugins and data were preserved. Update from Telegram.'
+    configure_project
+    start_service
+}
+
+main() {
+    parse_arguments "$@"
+    choose_language
+    preview_plan
+    [[ "$MODE" != 'preview' ]] || return 0
+    validate_platform
+    [[ "$MODE" != 'check' ]] || return 0
+    [[ "$EUID" == '0' ]] || fail 'Запустите через sudo bash install_cxh_fp.sh.' 'Run sudo bash install_cxh_fp.sh.'
+    validate_private_paths
+    prepare_workspace
+    if [[ -e "$PROJECT_DIRECTORY" ]]; then
+        resume_existing
+        return 0
+    fi
+    install_bootstrap_packages
+    download_release
+    install_python
+    prepare_project
+    configure_project
+    start_service
+}
+
+main "$@"

@@ -1,0 +1,40 @@
+[Unit]
+Description=CXH FP — FunPay shop
+Documentation=https://github.com/exfador/cxh-fp
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=coxerhub
+Group=coxerhub
+WorkingDirectory=/opt/cxh-fp
+ExecStart=/opt/cxh-fp/.venv/bin/python /opt/cxh-fp/main.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+Environment=COXERHUB_IS_RUNNING_AS_SERVICE=1
+Environment=LANG=C.UTF-8
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+RuntimeDirectory=coxerhub-bot/coxerhub
+RuntimeDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/cxh-fp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
