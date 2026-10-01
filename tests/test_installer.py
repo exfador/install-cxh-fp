@@ -72,7 +72,7 @@ def test_language_prompt_runs_before_platform_checks():
         timeout=5,
     )
     assert result.returncode == 0
-    assert result.stdout.index("English") < result.stdout.index("Ubuntu 22.04")
+    assert result.stdout.index("English") < result.stdout.index("Ubuntu 20.04")
 
 
 def test_existing_installation_preserves_data_and_finishes_setup(tmp_path):

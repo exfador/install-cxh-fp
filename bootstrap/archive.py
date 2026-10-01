@@ -15,7 +15,7 @@ def release_path(value, directory=False):
         or unicodedata.normalize("NFC", value) != value
     ):
         raise ValueError("Invalid update path")
-    name = value.removesuffix("/") if directory else value
+    name = value[:-1] if directory and value.endswith("/") else value
     path = PurePosixPath(name)
     if (
         not path.parts
@@ -116,7 +116,7 @@ def archive_members(archive, files):
     for member, path in zip(members, paths):
         validate_member_type(member)
         if member.is_dir() and not any(
-            PurePosixPath(name).is_relative_to(path) for name in files
+            path in PurePosixPath(name).parents for name in files
         ):
             raise ValueError("Update archive contains an unexpected directory")
     return [
@@ -161,8 +161,6 @@ def extract_member(archive, member, destination, digest):
         target.flush()
     if total != member.file_size or checksum.hexdigest() != digest:
         raise ValueError("Update file checksum mismatch")
-    if destination.suffix.casefold() == ".py":
-        compile(destination.read_bytes(), str(destination), "exec", dont_inherit=True)
 
 
 def extract_release(archive_path, stage, files):

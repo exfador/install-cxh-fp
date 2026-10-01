@@ -4,6 +4,8 @@ umask 077
 PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 export PATH
 
+SUPPORTED_UBUNTU_VERSIONS=('20.04' '22.04' '24.04')
+SUPPORTED_UBUNTU_LABEL='Ubuntu 20.04 / 22.04 / 24.04 LTS'
 PROJECT_DIRECTORY='/opt/cxh-fp'
 SERVICE_NAME='cxh-fp.service'
 SERVICE_FILE='/etc/systemd/system/cxh-fp.service'
@@ -58,7 +60,7 @@ say() {
 }
 
 fail() {
-    say "$1" "$2" >&2
+    say "Ошибка: $1" "Error: $2" >&2
     exit 1
 }
 
@@ -87,7 +89,7 @@ choose_language() {
 }
 
 preview_plan() {
-    say 'Ubuntu 22.04 / 24.04 LTS · x86_64 / aarch64 · systemd' 'Ubuntu 22.04 / 24.04 LTS · x86_64 / aarch64 · systemd'
+    say "$SUPPORTED_UBUNTU_LABEL · x86_64 / aarch64 · systemd" "$SUPPORTED_UBUNTU_LABEL · x86_64 / aarch64 · systemd"
     say '1. Проверка системы и подписанного релиза CXH FP.' '1. Check the system and signed CXH FP release.'
     say '2. Python 3.11.16 отдельно от системного Python.' '2. Python 3.11.16 separate from the system Python.'
     say '3. /opt/cxh-fp, пользователь coxerhub, зависимости с хешами.' '3. /opt/cxh-fp, coxerhub user, hash-locked dependencies.'
@@ -95,11 +97,22 @@ preview_plan() {
     say 'Первая сборка Python может занять 10–20 минут. Существующие установки и данные не переносятся.' 'The first Python build may take 10–20 minutes. Existing installations and data are not migrated.'
 }
 
+validate_distribution() {
+    local distribution="$1" version="$2" name="$3" supported
+    say "Обнаружена система: $name." "Detected system: $name."
+    if [[ "$distribution" == 'ubuntu' ]]; then
+        for supported in "${SUPPORTED_UBUNTU_VERSIONS[@]}"; do
+            [[ "$version" != "$supported" ]] || return 0
+        done
+    fi
+    fail "Установка остановлена: $name не поддерживается. Нужна $SUPPORTED_UBUNTU_LABEL. Система не изменена." "Installation stopped: $name is unsupported. Required: $SUPPORTED_UBUNTU_LABEL. The system was not changed."
+}
+
 validate_platform() {
-    [[ -r /etc/os-release ]] || fail 'Нужна Ubuntu 22.04 или 24.04.' 'Ubuntu 22.04 or 24.04 is required.'
-    local ID='' VERSION_ID=''
+    [[ -r /etc/os-release ]] || fail "Не удалось определить систему. Нужна $SUPPORTED_UBUNTU_LABEL." "Cannot detect the system. Required: $SUPPORTED_UBUNTU_LABEL."
+    local ID='' VERSION_ID='' PRETTY_NAME='Unknown'
     source /etc/os-release
-    [[ "$ID" == 'ubuntu' && ( "$VERSION_ID" == '22.04' || "$VERSION_ID" == '24.04' ) ]] || fail 'Поддерживаются Ubuntu 22.04 и 24.04 LTS.' 'Supported: Ubuntu 22.04 and 24.04 LTS.'
+    validate_distribution "$ID" "$VERSION_ID" "$PRETTY_NAME"
     case "$(uname -m)" in x86_64|aarch64) ;; *) fail 'Поддерживаются x86_64 и aarch64.' 'Supported: x86_64 and aarch64.' ;; esac
     [[ -d /run/systemd/system ]] || fail 'Нужна система с запущенным systemd.' 'A running systemd installation is required.'
     [[ -t 0 && -t 1 ]] || fail 'Запустите установщик в интерактивном терминале.' 'Run the installer in an interactive terminal.'
@@ -196,6 +209,10 @@ install_python() {
     python_is_complete || fail 'Сборка Python не завершена. Повторите установщик; данные сохранены.' 'Python installation is incomplete. Rerun the installer; data was preserved.'
 }
 
+validate_project_python() {
+    "$PYTHON_PREFIX/bin/python3.11" -I -m compileall -q "$WORK_DIRECTORY/source" || fail 'Код релиза не прошёл проверку Python 3.11. Установка остановлена.' 'Release code failed Python 3.11 validation. Installation stopped.'
+}
+
 ensure_account() {
     local account uid home shell
     if account="$(getent passwd "$SERVICE_USER")"; then
@@ -283,10 +300,13 @@ resume_existing() {
 main() {
     parse_arguments "$@"
     choose_language
-    preview_plan
-    [[ "$MODE" != 'preview' ]] || return 0
+    if [[ "$MODE" == 'preview' ]]; then preview_plan; return 0; fi
     validate_platform
-    [[ "$MODE" != 'check' ]] || return 0
+    if [[ "$MODE" == 'check' ]]; then
+        say 'Проверка пройдена. Система поддерживается; установка не запускалась.' 'Check passed. The system is supported; installation was not started.'
+        return 0
+    fi
+    preview_plan
     [[ "$EUID" == '0' ]] || fail 'Запустите через sudo bash install_cxh_fp.sh.' 'Run sudo bash install_cxh_fp.sh.'
     validate_private_paths
     prepare_workspace
@@ -297,6 +317,7 @@ main() {
     install_bootstrap_packages
     download_release
     install_python
+    validate_project_python
     prepare_project
     configure_project
     start_service

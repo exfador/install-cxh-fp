@@ -9,7 +9,9 @@
 
 Установка [CXH FP](https://github.com/exfador/cxh-fp) на собственный сервер: выбор русского или английского языка, проверенный релиз, отдельный Python и служба systemd.
 
-**Поддерживается Ubuntu 22.04 и 24.04 LTS**, архитектуры x86_64 и aarch64. Нужны права sudo, работающий systemd, интерактивный терминал и доступ к Ubuntu, GitHub, python.org и PyPI. Первая сборка Python обычно занимает 10–20 минут; время зависит от сервера. Количество потоков ограничено доступной памятью.
+**Поддерживается Ubuntu 20.04, 22.04 и 24.04 LTS**, архитектуры x86_64 и aarch64. Нужны права sudo, работающий systemd, интерактивный терминал и доступ к Ubuntu, GitHub, python.org и PyPI. Первая сборка Python обычно занимает 10–20 минут; время зависит от сервера. Количество потоков ограничено доступной памятью.
+
+Для новых серверов выбирайте Ubuntu 22.04 или 24.04. Для Ubuntu 20.04 расширенные обновления безопасности доступны через [Ubuntu Pro / ESM](https://ubuntu.com/security/esm); установщик не обновляет ОС автоматически.
 
 ## Установить
 
@@ -21,7 +23,7 @@ bash cxh-fp-install.sh --preview --language ru
 sudo bash cxh-fp-install.sh
 ```
 
-Сначала выберите язык. Затем мастер запросит настройки FunPay и Telegram. Ключи вводятся в терминале без отображения. Служба включается после сохранения настроек.
+Сначала выберите язык. Установщик покажет обнаруженную версию ОС и проверит совместимость. Если система не поддерживается, он явно сообщит причину и завершится без установки. Затем мастер запросит настройки FunPay и Telegram. Ключи вводятся в терминале без отображения. Служба включается после сохранения настроек.
 
 Для проверки поддерживаемой системы без установки:
 
@@ -78,4 +80,4 @@ bash -n install_cxh_fp.sh
 python3 -m pytest tests -q
 ```
 
-Tests use generated signing keys and isolated temporary directories. They cover tampering, ZIP traversal, symlinks, private paths, case collisions, compression bombs, malformed manifests, signature/key mismatches, existing-data preservation and interrupted installation. These checks do not replace an actual server installation test. The CI checks the distro bootstrap verifier on Ubuntu 22.04 and 24.04; it does not claim a full VM installation or live FunPay authentication test.
+Tests use generated signing keys and isolated temporary directories. They cover tampering, ZIP traversal, symlinks, private paths, case collisions, compression bombs, malformed manifests, signature/key mismatches, existing-data preservation and interrupted installation. These checks do not replace an actual server installation test. CI checks the distro bootstrap verifier on Ubuntu 20.04, 22.04 and 24.04. The Ubuntu 20.04 container additionally builds Python 3.11.16, verifies and installs the signed release, installs hash-locked dependencies as the service user, checks runtime imports and setup commands, and validates the systemd unit. A container test does not verify service startup on a full VM or live FunPay/Telegram authentication.

@@ -186,10 +186,9 @@ def test_existing_destination_and_private_data_are_preserved(tmp_path, signing_k
         {"main.py": b"pass\n"},
         {**REQUIRED_SOURCE, "app/FILE.py": b"pass\n", "app/file.py": b"pass\n"},
         {**REQUIRED_SOURCE, "app/huge.txt": b"a" * 1_000_000},
-        {**REQUIRED_SOURCE, "app/broken.py": b"def broken(:\n"},
     ],
 )
-def test_incomplete_colliding_bomb_and_invalid_python_releases_fail(
+def test_incomplete_colliding_and_bomb_releases_fail(
     tmp_path, signing_key, sources
 ):
     manifest, archive, destination = signed_release(tmp_path, signing_key, sources)
@@ -204,3 +203,25 @@ def test_each_file_digest_is_verified(tmp_path, signing_key):
     write_manifest(manifest, envelope["manifest"], signing_key)
     with pytest.raises(ValueError):
         verify.prepare_release(manifest, archive, destination)
+
+
+def test_signed_project_uses_newer_syntax_than_bootstrap(tmp_path, signing_key):
+    sources = dict(REQUIRED_SOURCE)
+    sources["main.py"] = b"match value:\n    case 1:\n        pass\n"
+    manifest, archive, destination = signed_release(tmp_path, signing_key, sources)
+    assert verify.prepare_release(manifest, archive, destination) == "1.1"
+    assert (destination / "main.py").read_bytes() == sources["main.py"]
+
+
+def test_signed_directory_entry_works_on_system_python(tmp_path, signing_key):
+    sources = dict(REQUIRED_SOURCE)
+    sources["app/module.py"] = b"pass\n"
+    manifest, archive, destination = signed_release(tmp_path, signing_key, sources)
+    with zipfile.ZipFile(archive, "a") as target:
+        target.writestr("app/", b"")
+    envelope = json.loads(manifest.read_text(encoding="utf-8"))["manifest"]
+    envelope["archive_size"] = archive.stat().st_size
+    envelope["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    write_manifest(manifest, envelope, signing_key)
+    assert verify.prepare_release(manifest, archive, destination) == "1.1"
+    assert (destination / "app/module.py").read_bytes() == b"pass\n"
