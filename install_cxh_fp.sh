@@ -11,6 +11,7 @@ SERVICE_NAME='cxh-fp.service'
 SERVICE_FILE='/etc/systemd/system/cxh-fp.service'
 SERVICE_USER='coxerhub'
 SERVICE_HOME='/var/lib/cxh-fp'
+SOURCE_BUILD_PACKAGE='pytelegrambotapi'
 PYTHON_VERSION='3.11.16'
 PYTHON_PREFIX='/opt/cxh-python/3.11.16'
 PYTHON_ARCHIVE_SHA256='91bcdebfdde239a003ae93738a7fce0f9230fee5c4bc2b86f6e6e8c6f98aabe8'
@@ -238,7 +239,7 @@ install_dependencies() {
     (
         cd "$PROJECT_DIRECTORY"
         runuser -u "$SERVICE_USER" -- env PIP_CONFIG_FILE=/dev/null "$PROJECT_DIRECTORY/.venv/bin/python" -m pip --isolated install --index-url https://pypi.org/simple --disable-pip-version-check \
-            --require-hashes --only-binary=:all: --timeout 30 --retries 2 -r requirements.txt
+            --require-hashes --only-binary=:all: --no-binary="$SOURCE_BUILD_PACKAGE" --no-build-isolation --timeout 30 --retries 2 -r requirements.txt
         runuser -u "$SERVICE_USER" -- "$PROJECT_DIRECTORY/.venv/bin/python" -m pip check
     )
 }

@@ -70,3 +70,14 @@ def test_invalid_release_syntax_stops_before_setup(tmp_path):
     assert result.returncode == 1
     assert "Release code failed Python 3.11 validation" in result.stderr
     assert "CONTINUED" not in result.stdout
+
+
+def test_dependency_source_exception_keeps_hashes_and_build_tools_pinned(tmp_path):
+    result = run_shell(
+        f'PROJECT_DIRECTORY="{tmp_path}"\nrunuser() {{ printf "%s\\n" "$*"; }}\ninstall_dependencies',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--require-hashes --only-binary=:all:" in result.stdout
+    assert "--no-binary=pytelegrambotapi --no-build-isolation" in result.stdout
+    assert "-u coxerhub --" in result.stdout
