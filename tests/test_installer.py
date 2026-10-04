@@ -80,6 +80,7 @@ def test_existing_installation_preserves_data_and_finishes_setup(tmp_path):
 PROJECT_DIRECTORY="$PWD"
 LANGUAGE=en
 ensure_account() { printf 'account\\n'; }
+upgrade_existing() { printf 'upgrade\\n'; }
 stat() { printf 'coxerhub'; }
 validate_python_prefix() { :; }
 install_python() { printf 'python\\n'; }
@@ -103,8 +104,89 @@ resume_existing
     result = run_shell("cd " + repr(str(tmp_path)) + "\n" + body, tmp_path)
     assert result.returncode == 0, result.stderr
     assert "dependencies\n" in result.stdout and "setup\nstart\n" in result.stdout
-    assert "python\nvenv\n" in result.stdout
+    assert "account\nupgrade\npython\nvenv\n" in result.stdout
     assert marker.read_text(encoding=ENCODING) == "preserved"
+
+
+UPGRADE_FIXTURE = """
+cd __ROOT__
+LANGUAGE=en
+PROJECT_DIRECTORY="$PWD/project"
+WORK_DIRECTORY="$PWD/work"
+install_bootstrap_packages() { printf 'packages\\n'; }
+download_release() {
+    mkdir -p "$WORK_DIRECTORY/source/app/constants" "$WORK_DIRECTORY/source/bot-profile"
+    printf 'VERSION = "__RELEASE__"\\n' > "$WORK_DIRECTORY/source/app/constants/runtime.py"
+    printf 'new\\n' > "$WORK_DIRECTORY/source/main.py"
+    printf 'release profile\\n' > "$WORK_DIRECTORY/source/bot-profile/description.txt"
+}
+install_python() { printf 'python\\n'; }
+validate_project_python() { printf 'compile\\n'; }
+systemctl() { printf 'systemctl %s\\n' "$*"; }
+backup_code() { printf 'backup %s\\n' "$1"; }
+chown() { printf 'chown\\n'; }
+upgrade_existing
+"""
+
+
+def upgrade_fixture(tmp_path, installed, release):
+    project = tmp_path / "project"
+    (project / "app/constants").mkdir(parents=True)
+    (project / "app/constants/runtime.py").write_text(
+        f'VERSION = "{installed}"\n', encoding=ENCODING
+    )
+    (project / "main.py").write_text("old\n", encoding=ENCODING)
+    for name, content in (
+        ("configs/_main.cfg", "settings"),
+        ("plugins/stars.py", "plugin"),
+        ("storage/cache/data.json", "{}"),
+        ("bot-profile/description.txt", "my profile"),
+    ):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding=ENCODING)
+    (tmp_path / "work").mkdir()
+    return (
+        UPGRADE_FIXTURE.replace("__ROOT__", repr(str(tmp_path)))
+        .replace("__RELEASE__", release)
+    )
+
+
+def test_rerun_upgrades_old_code_and_keeps_user_data(tmp_path):
+    result = run_shell(upgrade_fixture(tmp_path, "1.1", "1.1.7"), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Updating CXH FP 1.1 → 1.1.7" in result.stdout
+    assert "systemctl stop cxh-fp.service\nbackup 1.1\nchown\n" in result.stdout
+    project = tmp_path / "project"
+    assert (project / "main.py").read_text(encoding=ENCODING) == "new\n"
+    assert 'VERSION = "1.1.7"' in (project / "app/constants/runtime.py").read_text(
+        encoding=ENCODING
+    )
+    for name, content in (
+        ("configs/_main.cfg", "settings"),
+        ("plugins/stars.py", "plugin"),
+        ("storage/cache/data.json", "{}"),
+        ("bot-profile/description.txt", "my profile"),
+    ):
+        assert (project / name).read_text(encoding=ENCODING) == content
+
+
+@pytest.mark.parametrize("installed", ["1.1.7", "1.2"])
+def test_rerun_keeps_current_or_newer_code(tmp_path, installed):
+    result = run_shell(upgrade_fixture(tmp_path, installed, "1.1.7"), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert f"The latest version {installed} is installed." in result.stdout
+    assert "backup" not in result.stdout and "systemctl" not in result.stdout
+    assert (tmp_path / "project/main.py").read_text(encoding=ENCODING) == "old\n"
+
+
+@pytest.mark.parametrize(
+    "new, old, expected",
+    [("1.1.7", "1.1", 0), ("1.10", "1.9", 0), ("1.1.7", "1.1.7", 1), ("1.1", "1.1.7", 1)],
+)
+def test_version_comparison_is_numeric(tmp_path, new, old, expected):
+    result = run_shell(f"version_is_newer {new} {old}\n", tmp_path)
+    assert result.returncode == expected
 
 
 def test_existing_unrelated_directory_stops_without_starting(tmp_path):
