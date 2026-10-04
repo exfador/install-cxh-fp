@@ -7,6 +7,8 @@ export PATH
 SUPPORTED_UBUNTU_VERSIONS=('20.04' '22.04' '24.04')
 SUPPORTED_UBUNTU_LABEL='Ubuntu 20.04 / 22.04 / 24.04 LTS'
 PROJECT_DIRECTORY='/opt/cxh-fp'
+BACKUP_DIRECTORY='/opt/cxh-fp-backups'
+PRESERVED_PATHS=('configs' 'storage' 'plugins' 'logs' 'run' 'bot-profile' '.venv')
 SERVICE_NAME='cxh-fp.service'
 SERVICE_FILE='/etc/systemd/system/cxh-fp.service'
 SERVICE_USER='coxerhub'
@@ -95,7 +97,8 @@ preview_plan() {
     say '2. Python 3.11.16 отдельно от системного Python.' '2. Python 3.11.16 separate from the system Python.'
     say '3. /opt/cxh-fp, пользователь coxerhub, зависимости с хешами.' '3. /opt/cxh-fp, coxerhub user, hash-locked dependencies.'
     say '4. Настройка без отображения ключей и запуск через systemd.' '4. Configure without displaying secrets; start with systemd.'
-    say 'Первая сборка Python может занять 10–20 минут. Существующие установки и данные не переносятся.' 'The first Python build may take 10–20 minutes. Existing installations and data are not migrated.'
+    say 'Первая сборка Python может занять 10–20 минут. Установки в других папках не переносятся.' 'The first Python build may take 10–20 minutes. Installations in other folders are not migrated.'
+    say 'Повторный запуск обновляет /opt/cxh-fp до последнего релиза и сохраняет настройки, товары и плагины.' 'A rerun updates /opt/cxh-fp to the latest release and keeps settings, products and plugins.'
 }
 
 validate_distribution() {
@@ -122,7 +125,7 @@ validate_platform() {
 validate_private_paths() {
     local path
     [[ "$(stat -c '%u' /opt)" == '0' && -z "$(find /opt -maxdepth 0 -perm /022 -print)" ]] || fail 'Папка /opt должна принадлежать root.' 'The /opt directory must be owned and writable only by root.'
-    for path in /opt "$PYTHON_PREFIX" /opt/cxh-python "$LOCK_DIRECTORY" "$LOCK_FILE" "$SERVICE_HOME" "$PROJECT_DIRECTORY" "$SERVICE_FILE"; do
+    for path in /opt "$PYTHON_PREFIX" /opt/cxh-python "$LOCK_DIRECTORY" "$LOCK_FILE" "$SERVICE_HOME" "$PROJECT_DIRECTORY" "$BACKUP_DIRECTORY" "$SERVICE_FILE"; do
         [[ ! -L "$path" ]] || fail 'Обнаружена символическая ссылка в пути установки.' 'A symbolic link was found in an installation path.'
     done
     [[ ! -e "$PROJECT_DIRECTORY" || -d "$PROJECT_DIRECTORY" ]] || fail 'Путь установки занят файлом.' 'The installation path is occupied by a file.'
@@ -285,15 +288,71 @@ start_service() {
     fail 'Служба запущена, но готовность не подтверждена. Проверьте systemctl status cxh-fp.' 'The service started, but readiness was not confirmed. Check systemctl status cxh-fp.'
 }
 
+project_version() {
+    /usr/bin/python3 -I - "$1/app/constants/runtime.py" <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+
+try:
+    text = Path(sys.argv[1]).read_text(encoding="utf-8")
+except OSError:
+    text = ""
+match = re.search(r"^VERSION\s*=\s*[\"']([0-9]+(?:\.[0-9]+)*)[\"']", text, re.MULTILINE)
+print(match.group(1) if match else "0")
+PYTHON
+}
+
+version_is_newer() {
+    /usr/bin/python3 -I -c 'import sys; new, old = (tuple(map(int, value.split("."))) for value in sys.argv[1:3]); raise SystemExit(0 if new > old else 1)' "$1" "$2"
+}
+
+backup_code() {
+    local archive
+    archive="$BACKUP_DIRECTORY/cxh-fp-$1-$(date +%Y%m%d-%H%M%S).tar.gz"
+    install -d -o root -g root -m 700 "$BACKUP_DIRECTORY"
+    tar --create --gzip --file "$archive" --directory "$PROJECT_DIRECTORY" \
+        --exclude=./configs --exclude=./storage --exclude=./plugins --exclude=./logs --exclude=./run --exclude=./.venv .
+    say "Копия прежней версии: $archive" "Previous version backup: $archive"
+}
+
+replace_code() {
+    local path
+    for path in "${PRESERVED_PATHS[@]}"; do
+        [[ ! -e "$PROJECT_DIRECTORY/$path" ]] || rm -rf -- "${WORK_DIRECTORY:?}/source/$path"
+    done
+    cp -a -- "$WORK_DIRECTORY/source/." "$PROJECT_DIRECTORY/"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$PROJECT_DIRECTORY"
+}
+
+upgrade_existing() {
+    local installed release
+    install_bootstrap_packages
+    download_release
+    installed="$(project_version "$PROJECT_DIRECTORY")"
+    release="$(project_version "$WORK_DIRECTORY/source")"
+    if ! version_is_newer "$release" "$installed"; then
+        say "Установлена последняя версия $installed." "The latest version $installed is installed."
+        return 0
+    fi
+    say "Обновление CXH FP $installed → $release. Настройки, товары и плагины сохраняются." "Updating CXH FP $installed → $release. Settings, products and plugins are kept."
+    install_python
+    validate_project_python
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    backup_code "$installed"
+    replace_code
+}
+
 resume_existing() {
     [[ -e "$PROJECT_DIRECTORY" ]] || return 1
     [[ -f "$PROJECT_DIRECTORY/main.py" && -f "$PROJECT_DIRECTORY/requirements.txt" ]] || fail 'Папка занята другой установкой. Ничего не изменено.' 'The directory belongs to another installation. Nothing was changed.'
     [[ "$(stat -c '%U' "$PROJECT_DIRECTORY")" == "$SERVICE_USER" ]] || fail 'Владелец папки не coxerhub. Ничего не изменено.' 'The directory owner is not coxerhub. Nothing was changed.'
     ensure_account
+    upgrade_existing
     install_python
     runuser -u "$SERVICE_USER" -- "$PYTHON_PREFIX/bin/python3.11" -m venv "$PROJECT_DIRECTORY/.venv"
     install_dependencies
-    say 'Установка найдена. Код, плагины и данные сохранены. Обновления — в Telegram.' 'Installation found. Code, plugins and data were preserved. Update from Telegram.'
+    say 'Установка найдена. Настройки, товары и плагины сохранены.' 'Installation found. Settings, products and plugins were preserved.'
     configure_project
     start_service
 }
