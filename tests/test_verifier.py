@@ -26,8 +26,15 @@ def signing_key(monkeypatch):
     public = key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
-    monkeypatch.setattr(verify, "PUBLIC_KEY", public.hex())
+    monkeypatch.setattr(verify, "PUBLIC_KEYS", ("01" * 32, public.hex()))
     return key
+
+
+def test_new_and_previous_release_keys_are_trusted():
+    assert verify.PUBLIC_KEYS == (
+        "dda382fc2feabdd8198fd1dac0b3395b12198a44c19f39df96af183f0fe791a7",
+        "bf11e13ee0b888aafa65a04beb35eed373aba1c11c7a84a721e3582d58e5ee02",
+    )
 
 
 def signed_release(tmp_path, key, sources=None, modes=None):
@@ -110,7 +117,7 @@ def apply_mutation(mutation, envelope, archive, key, monkeypatch):
         "unknown": lambda: envelope["manifest"].update(extra=True),
         "digest": lambda: envelope["manifest"].update(archive_sha256="0" * 64),
         "size": lambda: envelope["manifest"].update(archive_size=True),
-        "key": lambda: monkeypatch.setattr(verify, "PUBLIC_KEY", "01" * 32),
+        "key": lambda: monkeypatch.setattr(verify, "PUBLIC_KEYS", ("01" * 32,)),
     }
     operations[mutation]()
     if mutation not in {"archive", "signature", "key"}:
